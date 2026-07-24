@@ -1,0 +1,27 @@
+{
+    "model_configuration": {
+        "model_id": "tourism_weather_experiment",
+        "model_architecture": "Scaleformer-FEDformerMS",
+        "features_mode": "M",
+        "target_variable": "tourist_count",
+        "input_sequence_length": 96,
+        "label_length": 48,
+        "forecasting_horizons":,
+        "number_of_scales": 3
+    },
+    "hyperparameters": {
+        "transformer_layers": 3,
+        "attention_heads": 8,
+        "hidden_dimension": 512,
+        "dropout_rate": 0.1,
+        "batch_size": 32,
+        "learning_rate": 1e-4,
+        "training_epochs": 100,
+        "early_stopping_patience": 10
+    },
+    "reproducibility_protocol": {
+        "total_independent_runs": 30,
+        "base_random_seed": 42,
+        "enforce_cuda_deterministic": true
+    }
+}
