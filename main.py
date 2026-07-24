@@ -22,7 +22,7 @@ def calculate_metrics(y_true, y_pred):
 
 def run_experiment_pipeline():
     # Load dataset arrays
-    X_train, Y_train, _, _, X_test, Y_test, _, _ = prepare_pipeline('synthetic_tourism_climate_dataset.csv', SEQ_LEN, PRED_LEN)
+    X_train, Y_train, _, _, X_test, Y_test, _, _ = prepare_pipeline('dataset.csv', SEQ_LEN, PRED_LEN)
     
     global_metrics = {m: [] for m in ['MSE', 'MAE', 'RMSE', 'MAPE']}
     
