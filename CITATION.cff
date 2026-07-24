@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Multi-Scale Frequency-Enhanced Model for Tourism Demand Forecasting"
+authors:
+  - family-names: "Matinkhah"
+    given-names: "S. Mojtaba"
+    orcid: "https://orcid.org/0000-0002-3800-8396"  
+date-released: "2026-07-24"
+version: "1.0.0"
+doi: "10.5281/zenodo.xxxxxxx"                       # update after Zenodo release
+repository-code: "https://github.com/matinkhah/tourism"
+license: "MIT"
+keywords:
+  - time-series-forecasting
+  - tourism-demand
+  - frequency-decomposition
+  - multi-scale-attention
+  - FEDformer
+  - deep-learning
