@@ -1,15 +1,4 @@
 # main.py
-#
-# Reproduces the experimental protocol of Sections IV-D and V:
-#   - Hyperparameters from Table (IV-D): L=96, H in {24,48,96}, 3 scales,
-#     2-4 Transformer layers, 8 heads, d_model=512, dropout=0.1,
-#     batch_size=32, Adam @ lr=1e-4, 100 epochs, early-stopping patience 10.
-#   - 30 independent deterministic runs with seeds {42+i : i=0..29}
-#     (Section V).
-#   - Training objective Loss = L_forecast + lambda*L_scale + gamma*L_freq
-#     (Equations 22-25).
-#   - Metrics MSE/MAE/RMSE/MAPE averaged (mean +/- SD) over the 30 runs
-#     (Table I).
 
 import os
 
