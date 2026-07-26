@@ -1,26 +1,4 @@
 # preprocess.py
-#
-# Data pipeline reproducing Section III-A (Problem Formulation), III-B
-# (target construction via monotonic cubic-spline interpolation), and
-# IV-A (Dataset Description and Geographical Co-location) of the paper.
-#
-# Pipeline summary:
-#   1. Aggregate the 10-minute Jena Climate records (Beutenberg station)
-#      into 16 daily meteorological variables -> matches the 16-dim
-#      climate vector W_t defined in Equation (3).
-#   2. Convert the monthly Thuringia hospitality registry (Table
-#      ge000802) into a smooth daily target y_t using a *monotonic*
-#      cubic Hermite spline (PCHIP) -- described in Section III-B as a
-#      deterministic low-pass filter that removes daily operational
-#      noise from the raw monthly counts.
-#   3. Merge the two series into the unified 17-dimensional channel
-#      array X_raw = [X_D || X_W] (Algorithm 1, line 2).
-#   4. Split chronologically into the exact 2,922 / 2,167 / 292 / 463
-#      day partition reported in Section IV-A (74.2% / 10.0% / 15.8%).
-#   5. Fit Z-score statistics on the training partition only (Section
-#      III-A) and apply them to all three partitions.
-#   6. Build supervised sliding windows with look-back L=96 and
-#      forecast horizon H in {24, 48, 96} (Equation 4).
 
 import os
 import random
