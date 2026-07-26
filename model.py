@@ -1,16 +1,4 @@
 # model.py
-#
-# Implements the proposed climate-aware multi-scale frequency-domain
-# forecasting architecture described in Section III-B..G and Algorithm 1:
-#   1. Climate-aware multivariate input embedding module (Eq. 19-21)
-#   2. Multi-scale temporal refinement module based on Scaleformer
-#      (Eq. 9-14)
-#   3. Frequency-enhanced decomposition module based on FEDformer
-#      (Eq. 15-18)
-#   4. Hierarchical forecasting decoder (Algorithm 1, Step 5)
-#
-# Default hyperparameters follow Table II / Section IV-D: d_model=512,
-# 8 attention heads, 2-4 Transformer layers per scale, dropout=0.1.
 
 import math
 
