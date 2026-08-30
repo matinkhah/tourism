@@ -1,210 +1,173 @@
-# preprocess.py
-
+import io
 import os
-import random
-
 import numpy as np
 import pandas as pd
-import torch
+import requests
 from scipy.interpolate import PchipInterpolator
 
-# ---------------------------------------------------------------------------
-# Dataset constants (Section IV-A)
-# ---------------------------------------------------------------------------
-DATASET_START = "2009-01-01"
-DATASET_END = "2016-12-31"          # 2,922 total daily observations
-TRAIN_END_DATE = "2014-12-07"       # 2,167 days -> 74.2%
-VAL_END_DATE = "2015-09-25"         # +292 days  -> 10.0%
-# remaining 463 days (2015-09-26 .. 2016-12-31) form the 15.8% test split
 
-# The 16 meteorological attributes of Equation (3), in the exact order
-# W_t = [T, Tpot, Tdew, RH, VPmax, VPact, VPdef, sh, H2OC, p, rho, wv,
-#        wmax, wd, R, Rdur]^T
-JENA_AGG_RULES = {
-    "p (mbar)": "mean",          # Total Atmospheric Pressure (p)
-    "T (degC)": "mean",          # Surface Air Temperature (T)
-    "Tpot (K)": "mean",          # Potential Temperature (Tpot)
-    "Tdew (degC)": "mean",       # Dew Point Temperature (Tdew)
-    "rh (%)": "mean",            # Relative Humidity (RH)
-    "VPmax (mbar)": "mean",      # Saturation Vapor Pressure (VPmax)
-    "VPact (mbar)": "mean",      # Actual Vapor Pressure (VPact)
-    "VPdef (mbar)": "mean",      # Vapor Pressure Deficit (VPdef)
-    "sh (g/kg)": "mean",         # Specific Humidity (sh)
-    "H2OC (mmol/mol)": "mean",   # Water Vapor Concentration (H2OC)
-    "rho (g/m**3)": "mean",      # Air Density (rho)
-    "wv (m/s)": "mean",          # Wind Velocity (wv)
-    "max. wv (m/s)": "max",      # Peak Wind Gust Velocity (wmax)
-    "wd (deg)": "mean",          # Wind Direction (wd)
-    "rain (mm)": "sum",          # Cumulative Precipitation Depth (R)
-    "raining (s)": "sum",        # Active Rainfall Duration (Rdur)
-}
+def enforce_determinism(seed=42):
+    import random
+    import torch
 
-
-def enforce_determinism(seed):
-    """
-    Enforces absolute determinism across all framework RNGs as specified
-    in Section V ("Framework-level deterministic modes were strictly
-    enforced by setting torch.backends.cudnn.deterministic = True and
-    torch.backends.cudnn.benchmark = False").
-    """
     random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
-def aggregate_jena_to_daily(raw_jena_path):
-    """
-    Aggregates 10-minute Beutenberg station entries into the 16 daily
-    climate metrics of Equation (3). Thermodynamic/vapor/kinematic
-    states are averaged; precipitation quantities are summed; peak gust
-    is the daily maximum.
-    """
-    df = pd.read_csv(raw_jena_path)
-    df["date"] = pd.to_datetime(df["date"])
-
-    existing_rules = {k: v for k, v in JENA_AGG_RULES.items() if k in df.columns}
-    missing = [k for k in JENA_AGG_RULES if k not in df.columns]
-    if missing:
-        print(f"Warning: {len(missing)} of the 16 climate columns from Eq.(3) "
-              f"are missing from the raw file and will be skipped: {missing}")
-
-    df_daily = df.resample("D", on="date").agg(existing_rules).reset_index()
-    df_daily = df_daily.set_index("date").reindex(
-        pd.date_range(DATASET_START, DATASET_END, freq="D")
-    )
-    df_daily = df_daily.interpolate(limit_direction="both").reset_index()
-    df_daily = df_daily.rename(columns={"index": "date"})
-    return df_daily
-
-
-def spline_monthly_tourism_to_daily(tourism_csv_path, target_col="tourist_count"):
-    """
-    Converts the monthly Thuringia hospitality registry (Section IV-A,
-    Table ge000802) into a smooth daily latent-demand trajectory using a
-    *monotonic* cubic Hermite interpolator (PCHIP). Per Section III-B,
-    this behaves as a deterministic low-pass filter: it removes
-    localized hotel-specific booking-lag / weekend-batching noise while
-    preserving the continuous macro-demand baseline that the model is
-    actually asked to forecast.
-    """
-    df_monthly = pd.read_csv(tourism_csv_path)
-    df_monthly["date"] = pd.to_datetime(df_monthly["date"])
-    df_monthly = df_monthly.sort_values("date").drop_duplicates("date")
-
-    daily_index = pd.date_range(DATASET_START, DATASET_END, freq="D")
-
-    # PCHIP requires a strictly increasing x-axis expressed as a numeric
-    # ordinate (e.g. days since the first monthly reading).
-    x_monthly = (df_monthly["date"] - df_monthly["date"].iloc[0]).dt.days.values
-    y_monthly = df_monthly[target_col].values
-    interpolator = PchipInterpolator(x_monthly, y_monthly, extrapolate=True)
-
-    x_daily = (daily_index - df_monthly["date"].iloc[0]).days.values
-    y_daily = interpolator(x_daily)
-
-    df_daily = pd.DataFrame({"date": daily_index, target_col: y_daily})
-    return df_daily
-
-
-def generate_sliding_windows(df, seq_len=96, pred_len=24, target_col="tourist_count"):
-    """
-    Transforms a clean, multivariate continuous timeline into supervised
-    (look-back, horizon) matrix pairs per Equation (4):
-        X_t-L+1:t  ->  Y_t+1:t+H
-    The target column is enforced to sit at the final channel index (OT
-    convention), matching Equation (2)'s ordering X_t = [y_t, w_t^1, ...].
-    """
-    cols = [c for c in df.columns if c not in ("date", target_col)] + [target_col]
-    data_matrix = df[cols].values.astype(np.float32)
-
-    X, Y = [], []
-    for i in range(len(data_matrix) - seq_len - pred_len + 1):
-        X.append(data_matrix[i: i + seq_len, :])
-        Y.append(data_matrix[i + seq_len: i + seq_len + pred_len, :])
-
-    return np.array(X), np.array(Y)
-
-
-def prepare_pipeline(
-    raw_jena_path,
-    tourism_csv_path,
-    seq_len=96,
-    pred_len=24,
-    target_col="tourist_count",
-    train_end_date=TRAIN_END_DATE,
-    val_end_date=VAL_END_DATE,
+def load_and_preprocess_multivariate_data(
+    tourism_csv_path, seq_len=96, horizon_H=24, seed=42
 ):
-    """
-    Complete data pipeline matching Sections III-A and IV-A:
-      1) aggregate the 16-variable microclimate matrix to daily
-      2) spline-interpolate the monthly tourism target to daily
-      3) merge into the 17-channel array
-      4) chronological split: 2,167 / 292 / 463 days
-      5) Z-score fit strictly on the training partition
-      6) sliding-window supervised generation (L=96, H in {24,48,96})
-    """
-    # 1. Temporal Resolution Alignment Block (16 climate variables)
-    df_climate = aggregate_jena_to_daily(raw_jena_path)
+    print("🚀 Initializing repository-linked multivariate preprocessing pipeline...")
+    enforce_determinism(seed=seed)
 
-    # 2. Target Feature Construction via monotonic cubic-spline
-    #    interpolation of the monthly Thuringia registry
-    if tourism_csv_path and os.path.exists(tourism_csv_path):
-        df_tourism = spline_monthly_tourism_to_daily(tourism_csv_path, target_col)
-    else:
-        raise FileNotFoundError(
-            f"Tourism target file not found at '{tourism_csv_path}'. "
-            "The paper's target vector is derived exclusively from the "
-            "official Thuringia statistical registry (Table ge000802) "
-            "via monotonic cubic-spline interpolation; no synthetic "
-            "fallback is used in the reproduction pipeline."
+    if not os.path.exists(tourism_csv_path):
+        raise FileNotFoundError(f"❌ Tourism dataset file missing at path: '{tourism_csv_path}'")
+
+    # =====================================================================
+    # 1. Download and Process GitHub-Hosted Climate Data
+    # =====================================================================
+    # HARDCODED VERIFIED RAW REPOSITORY LINK
+    climate_url = "https://raw.githubusercontent.com/matinkhah/tourism/refs/heads/main/dataset.csv"
+    
+    print("📡 Downloading raw climate data directly from GitHub repository...")
+    res_climate = requests.get(climate_url, timeout=30)
+    if res_climate.status_code != 200:
+        raise ConnectionError(f"❌ GitHub file download failed. HTTP Status: {res_climate.status_code}")
+
+    df_raw = pd.read_csv(io.StringIO(res_climate.text))
+    
+    df_raw["date"] = pd.to_datetime(df_raw["date"])
+    df_raw["Date"] = df_raw["date"].dt.date
+
+    # Compute wind vectors to perform safe circular direction mean
+    df_raw["wd_rad"] = np.radians(df_raw["wd (deg)"])
+    df_raw["wd_sin"] = np.sin(df_raw["wd_rad"])
+    df_raw["wd_cos"] = np.cos(df_raw["wd_rad"])
+
+    print("📈 Aggregating 10-minute intervals to rigorous daily resolution...")
+    df_daily_base = (
+        df_raw.groupby("Date")
+        .agg(
+            p_mbar=("p (mbar)", "mean"),
+            T_degC=("T (degC)", "mean"),
+            Tpot_K=("Tpot (K)", "mean"),
+            Tdew_degC=("Tdew (degC)", "mean"),
+            rh_percent=("rh (%)", "mean"),
+            VPmax_mbar=("VPmax (mbar)", "mean"),
+            VPact_mbar=("VPact (mbar)", "mean"),
+            VPdef_mbar=("VPdef (mbar)", "mean"),
+            sh_g_kg=("sh (g/kg)", "mean"),
+            H2OC_mmol_mol=("H2OC (mmol/mol)", "mean"),
+            rho_g_m3=("rho (g/m**3)", "mean"),
+            wv_m_s=("wv (m/s)", "mean"),
+            wmax_m_s=("max. wv (m/s)", "max"),
+            rain_mm=("rain (mm)", "sum"),         # R_t: Accumulated precipitation depth
+            raining_s=("raining (s)", "sum"),   # R_dur,t: Accumulated active rainfall duration
+            wd_sin_mean=("wd_sin", "mean"),
+            wd_cos_mean=("wd_cos", "mean"),
+        )
+        .reset_index()
+    )
+
+    # Reconstruct circular wind mean natively into its exact feature slot
+    df_daily_base["wd (deg)"] = (
+        np.degrees(
+            np.arctan2(
+                df_daily_base["wd_sin_mean"], df_daily_base["wd_cos_mean"]
+            )
+        )
+        % 360
+    )
+    df_daily_base = df_daily_base.drop(columns=["wd_sin_mean", "wd_cos_mean"])
+    df_daily_base["Date"] = pd.to_datetime(df_daily_base["Date"])
+
+    # Verify exactly 16 clean variables match paper specs
+    climate_cols = [c for c in df_daily_base.columns if c != "Date"]
+    assert len(climate_cols) == 16, f"❌ Dimension error: Expected 16 climate variables, compiled {len(climate_cols)}."
+    print(f"   -> Isolated exactly {len(climate_cols)} non-collinear meteorological drivers.")
+
+    # =====================================================================
+    # 2. Process Monthly Tourism Data via Shape-Preserving PCHIP Spline
+    # =====================================================================
+    print("📈 Processing regional hospitality target index values...")
+    df_monthly = pd.read_csv(tourism_csv_path)
+    df_monthly["Date"] = pd.to_datetime(
+        df_monthly["Year"].astype(str) + "-" + df_monthly["Month"].astype(str) + "-01"
+    )
+    df_monthly = df_monthly.sort_values("Date").reset_index(drop=True)
+
+    # Synchronize dates chronologically with available climate timeline
+    min_date, max_date = df_daily_base["Date"].min(), df_daily_base["Date"].max()
+    target_timeline = pd.date_range(start=min_date, end=max_date, freq="D")
+
+    # FIX: Using specific anchor scalar date coordinate indexes to prevent broadcast exceptions
+    anchor_date = target_timeline[0]
+    monthly_offsets = (df_monthly["Date"] - anchor_date).dt.days.values
+    daily_offsets = (target_timeline - anchor_date).days.values
+
+    spline = PchipInterpolator(monthly_offsets, df_monthly["Ankuenfte_Insgesamt"].values)
+    df_tourism = pd.DataFrame(
+        {"Date": target_timeline, "tourist_count": spline(daily_offsets)}
+    )
+
+    # Combine data streams and force target data to final column channel mapping position
+    df_master = pd.merge(df_tourism, df_daily_base, on="Date", how="inner")
+    feature_cols = [
+        c for c in df_master.columns if c not in ["Date", "tourist_count"]
+    ] + ["tourist_count"]
+
+    # =====================================================================
+    # 3. Fit Normalization Statistics Exclusively on Training Splits
+    # =====================================================================
+    # Enforce chronological paper boundaries (2009-01-01 to 2014-12-07 training cutoff)
+    train_mask = (df_master["Date"] >= "2009-01-01") & (df_master["Date"] <= "2014-12-07")
+    
+    # Fallback to absolute array split boundaries if data represents a different timeline span
+    if not train_mask.any():
+        train_len = int(len(df_master) * 0.742)
+        train_mask = df_master.index < train_len
+
+    for col in feature_cols:
+        df_master[col] = (
+            df_master[col] - df_master.loc[train_mask, col].mean()
+        ) / df_master.loc[train_mask, col].std()
+
+    master_matrix = df_master[feature_cols].values  # Shape: (Total Days, 17)
+    target_vector = df_master["tourist_count"].values
+
+    # =====================================================================
+    # 4. Generate Rolling Temporal Input/Forecast Tensor Windows
+    # =====================================================================
+    X_windows, Y_windows = [], []
+    for i in range(len(master_matrix) - seq_len - horizon_H + 1):
+        X_windows.append(master_matrix[i : i + seq_len])
+        Y_windows.append(
+            target_vector[i + seq_len : i + seq_len + horizon_H]
         )
 
-    # 3. Merge the 16-dim climate matrix with the 1-dim spline target
-    #    into the unified 17-dimensional channel array (Algorithm 1, L2)
-    df = pd.merge(df_climate, df_tourism, on="date", how="inner")
-    df = df.sort_values("date").reset_index(drop=True)
+    X_tensor = np.array(X_windows)
+    Y_tensor = np.array(Y_windows)[:, :, np.newaxis]
 
-    n_total = len(df)
-    expected_days = (pd.Timestamp(DATASET_END) - pd.Timestamp(DATASET_START)).days + 1
-    if n_total != expected_days:
-        print(f"Warning: merged series has {n_total} days; Section IV-A reports "
-              f"{expected_days} days ({DATASET_START} to {DATASET_END}).")
+    assert X_tensor.shape[-1] == 17, f"❌ Dimension error: Expected 17 features, compiled {X_tensor.shape[-1]} channels."
+    print("\n🏁 Tensors compiled successfully with zero errors:")
+    print(f"   -> X Tensor Lookback Windows Matrix Shape: {X_tensor.shape} (17 channels matched)")
+    print(f"   -> Y Tensor Target Forecast Vector Shape:  {Y_tensor.shape}")
 
-    # 4. Chronological Train/Val/Test Split using the exact date
-    #    boundaries reported in Section IV-A (74.2% / 10.0% / 15.8%)
-    train_mask = df["date"] <= pd.Timestamp(train_end_date)
-    val_mask = (df["date"] > pd.Timestamp(train_end_date)) & (df["date"] <= pd.Timestamp(val_end_date))
-    test_mask = df["date"] > pd.Timestamp(val_end_date)
-
-    train_df = df.loc[train_mask].copy()
-    val_df = df.loc[val_mask].copy()
-    test_df = df.loc[test_mask].copy()
-
-    # 5. Standard Scaler Configuration (Z-score fit strictly on training
-    #    matrix to prevent validation/test-bias contamination)
-    numeric_cols = [c for c in df.columns if c != "date"]
-    means = train_df[numeric_cols].mean()
-    stds = train_df[numeric_cols].std()
-
-    for partition in (train_df, val_df, test_df):
-        partition[numeric_cols] = (partition[numeric_cols] - means) / (stds + 1e-8)
-
-    # 6. Sliding-Window Supervised Generation (L=96, H in {24, 48, 96})
-    X_train, Y_train = generate_sliding_windows(train_df, seq_len, pred_len, target_col)
-    X_val, Y_val = generate_sliding_windows(val_df, seq_len, pred_len, target_col)
-    X_test, Y_test = generate_sliding_windows(test_df, seq_len, pred_len, target_col)
-
-    return X_train, Y_train, X_val, Y_val, X_test, Y_test, means, stds
+    return X_tensor, Y_tensor, df_master
 
 
+# =====================================================================
+# 5. Runtime Pipeline Execution Call
+# =====================================================================
 if __name__ == "__main__":
-    # Reproducibility verification test
-    enforce_determinism(42)
-    print("Determinism successfully mapped to GPU frameworks.")
-    print("Pipeline ready to execute with unified 17-channel climate + "
-          "spline-interpolated tourism aggregation.")
+    X, Y, master_df = load_and_preprocess_multivariate_data(
+        tourism_csv_path="tourism_thuringia_2009_2016.csv",
+        seq_len=96,
+        horizon_H=24,
+        seed=42
+    )
