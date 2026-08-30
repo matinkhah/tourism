@@ -1,4 +1,3 @@
-```markdown
 # Multi-Scale Frequency-Enhanced Model for Tourism Demand Forecasting
 
 Official implementation of the multi-scale deep learning framework described in:
@@ -155,4 +154,3 @@ MIT License.
 
 Dr. S. Mojtaba Matinkhah  
 matinkhah@yazd.ac.ir
-```
