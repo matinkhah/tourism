@@ -142,7 +142,7 @@ class ScaleformerFEDformerPipeline(nn.Module):
 
     def __init__(
         self,
-        c_in=17,
+        c_in=15,
         seq_len=96,
         pred_len=24,
         d_model=512,
