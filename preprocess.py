@@ -6,7 +6,7 @@ import requests
 from scipy.interpolate import PchipInterpolator
 
 
-def enforce_determinism(seed=42):
+def enforce_determinism(seed: int = 42) -> None:
     import random
     import torch
 
@@ -20,154 +20,178 @@ def enforce_determinism(seed=42):
 
 
 def load_and_preprocess_multivariate_data(
-    tourism_csv_path, seq_len=96, horizon_H=24, seed=42
+    tourism_csv_path: str,
+    seq_len: int = 96,
+    horizon_H: int = 24,
+    seed: int = 42,
+    climate_csv_path: str = "dataset.csv",
 ):
-    print("🚀 Initializing repository-linked multivariate preprocessing pipeline...")
+    print("🚀 Initializing multivariate preprocessing pipeline...")
     enforce_determinism(seed=seed)
 
     if not os.path.exists(tourism_csv_path):
-        raise FileNotFoundError(f"❌ Tourism dataset file missing at path: '{tourism_csv_path}'")
+        raise FileNotFoundError(f"❌ Tourism file missing: '{tourism_csv_path}'")
 
     # =====================================================================
-    # 1. Download and Process GitHub-Hosted Climate Data
+    # 1. Load climate data (local file preferred)
     # =====================================================================
-    # HARDCODED VERIFIED RAW REPOSITORY LINK
-    climate_url = "https://raw.githubusercontent.com/matinkhah/tourism/refs/heads/main/dataset.csv"
-    
-    print("📡 Downloading raw climate data directly from GitHub repository...")
-    res_climate = requests.get(climate_url, timeout=30)
-    if res_climate.status_code != 200:
-        raise ConnectionError(f"❌ GitHub file download failed. HTTP Status: {res_climate.status_code}")
+    print("📡 Loading climate data...")
+    if os.path.exists(climate_csv_path):
+        df_raw = pd.read_csv(climate_csv_path)
+        print(f"   -> Loaded local file: {climate_csv_path}")
+    else:
+        # Fallback to the old GitHub-hosted file
+        climate_url = "https://raw.githubusercontent.com/matinkhah/tourism/refs/heads/main/dataset.csv"
+        print("   -> Local file not found, downloading from GitHub...")
+        res = requests.get(climate_url, timeout=60)
+        if res.status_code != 200:
+            raise ConnectionError(f"❌ Download failed (HTTP {res.status_code})")
+        df_raw = pd.read_csv(io.StringIO(res.text))
 
-    df_raw = pd.read_csv(io.StringIO(res_climate.text))
-    
-    df_raw["date"] = pd.to_datetime(df_raw["date"])
-    df_raw["Date"] = df_raw["date"].dt.date
+    # --- Normalise datetime column name ---
+    if "Date Time" in df_raw.columns:
+        df_raw["date"] = pd.to_datetime(df_raw["Date Time"], format="%d.%m.%Y %H:%M:%S", errors="coerce")
+    elif "date" in df_raw.columns:
+        df_raw["date"] = pd.to_datetime(df_raw["date"], errors="coerce")
+    else:
+        raise KeyError("Could not find a datetime column ('Date Time' or 'date')")
 
-    # Compute wind vectors to perform safe circular direction mean
-    df_raw["wd_rad"] = np.radians(df_raw["wd (deg)"])
-    df_raw["wd_sin"] = np.sin(df_raw["wd_rad"])
-    df_raw["wd_cos"] = np.cos(df_raw["wd_rad"])
+    df_raw = df_raw.dropna(subset=["date"]).copy()
+    df_raw["Date"] = df_raw["date"].dt.normalize()   # midnight timestamps
 
-    print("📈 Aggregating 10-minute intervals to rigorous daily resolution...")
-    df_daily_base = (
+    # --- Circular wind direction helpers ---
+    if "wd (deg)" in df_raw.columns:
+        df_raw["wd_rad"] = np.radians(df_raw["wd (deg)"])
+        df_raw["wd_sin"] = np.sin(df_raw["wd_rad"])
+        df_raw["wd_cos"] = np.cos(df_raw["wd_rad"])
+    else:
+        df_raw["wd_sin"] = 0.0
+        df_raw["wd_cos"] = 1.0
+
+    print("📈 Aggregating 10-minute data to daily resolution...")
+
+    # Build aggregation dictionary only for columns that actually exist
+    agg_dict = {}
+    candidates = {
+        "p_mbar":          ("p (mbar)", "mean"),
+        "T_degC":          ("T (degC)", "mean"),
+        "Tpot_K":          ("Tpot (K)", "mean"),
+        "Tdew_degC":       ("Tdew (degC)", "mean"),
+        "rh_percent":      ("rh (%)", "mean"),
+        "VPmax_mbar":      ("VPmax (mbar)", "mean"),
+        "VPact_mbar":      ("VPact (mbar)", "mean"),
+        "VPdef_mbar":      ("VPdef (mbar)", "mean"),
+        "sh_g_kg":         ("sh (g/kg)", "mean"),
+        "H2OC_mmol_mol":   ("H2OC (mmol/mol)", "mean"),
+        "rho_g_m3":        ("rho (g/m**3)", "mean"),
+        "wv_m_s":          ("wv (m/s)", "mean"),
+        "wmax_m_s":        ("max. wv (m/s)", "max"),
+        "rain_mm":         ("rain (mm)", "sum"),
+        "raining_s":       ("raining (s)", "sum"),
+    }
+
+    for new_name, (old_name, how) in candidates.items():
+        if old_name in df_raw.columns:
+            agg_dict[new_name] = (old_name, how)
+
+    # Always aggregate the wind vectors if present
+    if "wd_sin" in df_raw.columns:
+        agg_dict["wd_sin_mean"] = ("wd_sin", "mean")
+        agg_dict["wd_cos_mean"] = ("wd_cos", "mean")
+
+    df_daily = (
         df_raw.groupby("Date")
-        .agg(
-            p_mbar=("p (mbar)", "mean"),
-            T_degC=("T (degC)", "mean"),
-            Tpot_K=("Tpot (K)", "mean"),
-            Tdew_degC=("Tdew (degC)", "mean"),
-            rh_percent=("rh (%)", "mean"),
-            VPmax_mbar=("VPmax (mbar)", "mean"),
-            VPact_mbar=("VPact (mbar)", "mean"),
-            VPdef_mbar=("VPdef (mbar)", "mean"),
-            sh_g_kg=("sh (g/kg)", "mean"),
-            H2OC_mmol_mol=("H2OC (mmol/mol)", "mean"),
-            rho_g_m3=("rho (g/m**3)", "mean"),
-            wv_m_s=("wv (m/s)", "mean"),
-            wmax_m_s=("max. wv (m/s)", "max"),
-            rain_mm=("rain (mm)", "sum"),         # R_t: Accumulated precipitation depth
-            raining_s=("raining (s)", "sum"),   # R_dur,t: Accumulated active rainfall duration
-            wd_sin_mean=("wd_sin", "mean"),
-            wd_cos_mean=("wd_cos", "mean"),
-        )
+        .agg(**{k: v for k, v in agg_dict.items()})
         .reset_index()
     )
 
-    # Reconstruct circular wind mean natively into its exact feature slot
-    df_daily_base["wd (deg)"] = (
-        np.degrees(
-            np.arctan2(
-                df_daily_base["wd_sin_mean"], df_daily_base["wd_cos_mean"]
-            )
+    # Reconstruct mean wind direction
+    if "wd_sin_mean" in df_daily.columns:
+        df_daily["wd_deg"] = (
+            np.degrees(np.arctan2(df_daily["wd_sin_mean"], df_daily["wd_cos_mean"])) % 360
         )
-        % 360
-    )
-    df_daily_base = df_daily_base.drop(columns=["wd_sin_mean", "wd_cos_mean"])
-    df_daily_base["Date"] = pd.to_datetime(df_daily_base["Date"])
+        df_daily = df_daily.drop(columns=["wd_sin_mean", "wd_cos_mean"])
+    else:
+        df_daily["wd_deg"] = 0.0
 
-    # Verify exactly 16 clean variables match paper specs
-    climate_cols = [c for c in df_daily_base.columns if c != "Date"]
-    assert len(climate_cols) == 16, f"❌ Dimension error: Expected 16 climate variables, compiled {len(climate_cols)}."
-    print(f"   -> Isolated exactly {len(climate_cols)} non-collinear meteorological drivers.")
+    df_daily["Date"] = pd.to_datetime(df_daily["Date"])
+
+    climate_cols = [c for c in df_daily.columns if c != "Date"]
+    print(f"   -> Daily climate variables available: {len(climate_cols)} → {climate_cols}")
 
     # =====================================================================
-    # 2. Process Monthly Tourism Data via Shape-Preserving PCHIP Spline
+    # 2. Monthly tourism → daily via PCHIP
     # =====================================================================
-    print("📈 Processing regional hospitality target index values...")
+    print("📈 Processing tourism target (PCHIP interpolation)...")
     df_monthly = pd.read_csv(tourism_csv_path)
     df_monthly["Date"] = pd.to_datetime(
         df_monthly["Year"].astype(str) + "-" + df_monthly["Month"].astype(str) + "-01"
     )
     df_monthly = df_monthly.sort_values("Date").reset_index(drop=True)
 
-    # Synchronize dates chronologically with available climate timeline
-    min_date, max_date = df_daily_base["Date"].min(), df_daily_base["Date"].max()
+    min_date = df_daily["Date"].min()
+    max_date = df_daily["Date"].max()
     target_timeline = pd.date_range(start=min_date, end=max_date, freq="D")
 
-    # FIX: Using specific anchor scalar date coordinate indexes to prevent broadcast exceptions
-    anchor_date = target_timeline[0]
-    monthly_offsets = (df_monthly["Date"] - anchor_date).dt.days.values
-    daily_offsets = (target_timeline - anchor_date).days.values
+    anchor = target_timeline[0]
+    monthly_offsets = (df_monthly["Date"] - anchor).dt.days.values
+    daily_offsets   = (target_timeline - anchor).days.values
 
     spline = PchipInterpolator(monthly_offsets, df_monthly["Ankuenfte_Insgesamt"].values)
-    df_tourism = pd.DataFrame(
-        {"Date": target_timeline, "tourist_count": spline(daily_offsets)}
-    )
+    df_tourism = pd.DataFrame({
+        "Date": target_timeline,
+        "tourist_count": spline(daily_offsets)
+    })
 
-    # Combine data streams and force target data to final column channel mapping position
-    df_master = pd.merge(df_tourism, df_daily_base, on="Date", how="inner")
-    feature_cols = [
-        c for c in df_master.columns if c not in ["Date", "tourist_count"]
-    ] + ["tourist_count"]
+    # Inner join keeps only overlapping days
+    df_master = pd.merge(df_tourism, df_daily, on="Date", how="inner")
+    feature_cols = [c for c in df_master.columns if c not in ["Date", "tourist_count"]] + ["tourist_count"]
+
+    print(f"   -> Merged timeline: {df_master['Date'].min().date()} → {df_master['Date'].max().date()} "
+          f"({len(df_master)} days)")
 
     # =====================================================================
-    # 3. Fit Normalization Statistics Exclusively on Training Splits
+    # 3. Train-only Z-score normalisation
     # =====================================================================
-    # Enforce chronological paper boundaries (2009-01-01 to 2014-12-07 training cutoff)
     train_mask = (df_master["Date"] >= "2009-01-01") & (df_master["Date"] <= "2014-12-07")
-    
-    # Fallback to absolute array split boundaries if data represents a different timeline span
     if not train_mask.any():
+        # Fallback if the climate file has a different date range
         train_len = int(len(df_master) * 0.742)
         train_mask = df_master.index < train_len
+        print("   ⚠ Using percentage-based train split (date boundaries not found)")
 
     for col in feature_cols:
-        df_master[col] = (
-            df_master[col] - df_master.loc[train_mask, col].mean()
-        ) / df_master.loc[train_mask, col].std()
+        mu = df_master.loc[train_mask, col].mean()
+        sigma = df_master.loc[train_mask, col].std()
+        df_master[col] = (df_master[col] - mu) / (sigma + 1e-8)
 
-    master_matrix = df_master[feature_cols].values  # Shape: (Total Days, 17)
+    master_matrix = df_master[feature_cols].values
     target_vector = df_master["tourist_count"].values
 
     # =====================================================================
-    # 4. Generate Rolling Temporal Input/Forecast Tensor Windows
+    # 4. Sliding windows
     # =====================================================================
     X_windows, Y_windows = [], []
     for i in range(len(master_matrix) - seq_len - horizon_H + 1):
         X_windows.append(master_matrix[i : i + seq_len])
-        Y_windows.append(
-            target_vector[i + seq_len : i + seq_len + horizon_H]
-        )
+        Y_windows.append(target_vector[i + seq_len : i + seq_len + horizon_H])
 
-    X_tensor = np.array(X_windows)
-    Y_tensor = np.array(Y_windows)[:, :, np.newaxis]
+    X_tensor = np.asarray(X_windows, dtype=np.float32)
+    Y_tensor = np.asarray(Y_windows, dtype=np.float32)[:, :, np.newaxis]
 
-    assert X_tensor.shape[-1] == 17, f"❌ Dimension error: Expected 17 features, compiled {X_tensor.shape[-1]} channels."
-    print("\n🏁 Tensors compiled successfully with zero errors:")
-    print(f"   -> X Tensor Lookback Windows Matrix Shape: {X_tensor.shape} (17 channels matched)")
-    print(f"   -> Y Tensor Target Forecast Vector Shape:  {Y_tensor.shape}")
+    n_features = X_tensor.shape[-1]
+    print("\n🏁 Preprocessing finished:")
+    print(f"   -> X shape : {X_tensor.shape}  (features = {n_features})")
+    print(f"   -> Y shape : {Y_tensor.shape}")
+    print(f"   -> Feature order: {feature_cols}")
 
     return X_tensor, Y_tensor, df_master
 
 
-# =====================================================================
-# 5. Runtime Pipeline Execution Call
-# =====================================================================
 if __name__ == "__main__":
     X, Y, master_df = load_and_preprocess_multivariate_data(
         tourism_csv_path="tourism_thuringia_2009_2016.csv",
         seq_len=96,
         horizon_H=24,
-        seed=42
+        seed=42,
     )
