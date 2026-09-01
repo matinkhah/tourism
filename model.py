@@ -135,7 +135,7 @@ class ScaleEncoder(nn.Module):
 class ScaleformerFEDformerPipeline(nn.Module):
     """
     Full climate-aware multi-scale frequency-domain forecaster
-    (Algorithm 1). c_in must equal 17: 16 meteorological channels
+    (Algorithm 1). c_in must equal 15: 14 meteorological channels
     (Eq. 3) + 1 tourism target channel, appended last per the OT
     convention used by preprocess.generate_sliding_windows.
     """
@@ -152,7 +152,7 @@ class ScaleformerFEDformerPipeline(nn.Module):
         top_k=8,
     ):
         super().__init__()
-        assert c_in >= 2, "c_in must include the 16 climate channels + 1 target"
+        assert c_in >= 2, "c_in must include the 14 climate channels + 1 target"
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.d_model = d_model
